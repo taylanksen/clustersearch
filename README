@@ -1,0 +1,6 @@
+Code to evaluate kmeans and gaussian mixture models, searching for the
+feature subset which gives best results (according to silhoutte score, 
+Calinski Harabasz score, or Bayesian Information Criterion). 
+
+Code is basically a glorified wrapper around core sklearn.
+Portions developed by Matt Levin and Minh Tran of University of Rochester.

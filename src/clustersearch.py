@@ -43,7 +43,7 @@ import os
 import sys
 import argparse
 import logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 from collections import defaultdict
@@ -84,19 +84,20 @@ class ClusterSearch:
     
     : bin_search - counts frequencies for all possible binary subsets
     
-    : write_clusters
-    : write_scores
-    : write_plots
+    : _write_km_clusters
+    : _write_km_scores
+    : _save_km_cluster_plots
     """
     
-    def __init__(s, infile, outdir, kmax, dmax, algorithm):
+    def __init__(s, infile, outdir, k_range, d_range, algorithm, repeats=5):
         """Saves parameters, loads data. """
         assert algorithm in ['km','gmm'], 'Invalid clustering type:' + algorithm
         s.infile = infile
         s.outdir = outdir
-        s.k_max = kmax
-        s.d_max = dmax
+        s.k_range = k_range
+        s.d_range = d_range
         s.algorithm = algorithm
+        s.repeats = repeats
         
         if not os.path.isdir(outdir):
             log.info('creating directory: ' + outdir)
@@ -121,16 +122,14 @@ class ClusterSearch:
             --> <outdir>/<km/gmm>_<features>_scores.csv
         """
         if s.algorithm == 'km':
-            k_range = range(2, s.k_max + 1)
             f_search = s.km_search
         elif s.algorithm == 'gmm':
-            k_range = range(1, s.k_max + 1)
             f_search = s.gmm_search
         
-        for num_features in range(1, s.d_max + 1):
+        for num_features in s.d_range:
             feature_combo_list = list(combinations(features, num_features))        
             for feature_subset in feature_combo_list:
-                f_search(k_range, feature_subset)
+                f_search(s.k_range, feature_subset)
                 
     #-------------------------------------------
     def km_search(s, k_range, features):
@@ -150,50 +149,60 @@ class ClusterSearch:
         root_name = s.outdir + '/km_' + \
             '_'.join(features).replace(' ','')
 
+        d = len(features)
         cluster_list = []
         sil_scores = []
         ch_scores = []
         X = s.df.loc[:,features].dropna().values
-        log.info('\tX.shape' + str(X.shape))
+        log.debug('\tX.shape' + str(X.shape))
         for k in k_range:
             k_name = root_name + '_' + str(k) + '_clusters'
             if os.path.isfile(k_name + '.png'):
-                logging.info('file exists, skipping...' + k_name + '.png')
+                log.info('file exists, skipping...' + k_name + '.png')
                 continue
-            log.info('\tk=' + str(k) )
-            #k_means = cluster.KMeans(n_clusters=k, max_iter=1000, n_jobs=-1)
-            k_means = cluster.MiniBatchKMeans(n_clusters=k, max_iter=1000)
-            k_means.fit(X)
-            y = k_means.predict(X)
-            
-            sil_score = s.calc_sil_score(X,y)
-            ch_score = calinski_harabaz_score(X,y)
-            
+            ch_scores_i = []
+            sil_scores_i = []
+            clusters_i = []
+            # run multiple times (local minima) and pick best
+            for i in range(s.repeats): 
+                log.info('\td=' + str(d) + '  k=' + str(k) + '  i=' + str(i))
+                #k_means = cluster.KMeans(n_clusters=k, max_iter=1000, n_jobs=-1)
+                k_means = cluster.MiniBatchKMeans(n_clusters=k, max_iter=1000)
+                k_means.fit(X)
+                y = k_means.predict(X)
+                
+                sil_scores_i.append(s._calc_sil_score(X,y))
+                ch_scores_i.append(calinski_harabaz_score(X,y))
+                            
+                clusters_i.append(k_means.cluster_centers_)
+            # pick best kmeans run according to CH score
+            best_i = np.argmax(ch_scores_i)
+            ch_score = ch_scores_i[best_i]    
+            sil_score = sil_scores_i[best_i]
+            clusters = clusters_i[best_i]
             log.info('silhouette score with ' + str(k) + ' clusters: ' + \
                              '{0:.3f}'.format(sil_score))
             log.info('CH score with ' + str(k) + ' clusters: ' + \
                              '{0:.3f}'.format(ch_score))
             
-            clusters = k_means.cluster_centers_
-                
             # write the clusters to a csv file
-            s.write_clusters(k_name + '.csv', features, clusters)
+            s._write_km_clusters(k_name + '.csv', features, clusters)
             subtitle = 'sil score: ' + '{:.3f}'.format(sil_score)
             subtitle += ', CH score: ' + '{:.2E}'.format(ch_score)
-            s.write_plots(k_name + '.png', features, X,[clusters], subtitle)  
-            s.write_scores(root_name + '_scores.csv', features, [k], [sil_score], [ch_score])
+            s._save_km_cluster_plots(k_name + '.png', features, X,[clusters], subtitle)  
+            s._write_km_scores(root_name + '_scores.csv', features, [k], [sil_score], [ch_score])
 
             sil_scores.append(sil_score)
             ch_scores.append(ch_score)
         
         if len(ch_scores) > 1:
-            s.save_score_plot(root_name + '_scores.png', k_range, ch_scores)
+            s._save_score_plot(root_name + '_scores.png', k_range, ch_scores, 
+                              sil_scores)
             #k_start = cluster_list[0].shape[0]
             #k_end = cluster_list[-1].shape[0]
             #fname = s.outdir + 'km_' + '_'.join(features).replace(' ','') + '_R' + \
             #                        str(k_start) + 'to' + str(k_end) + '_scores.png'
             
-        
         return sil_scores, ch_scores
     
     #-------------------------------------------
@@ -239,15 +248,15 @@ class ClusterSearch:
                              '{0:.3f}'.format(bic))
                 
             # write the clusters to a csv file
-            s.write_gmm_clusters(k_name + '.csv', gmm, features, X_)
+            s._write_gmm_clusters(k_name + '.csv', gmm, features, X_)
             subtitle = ', BIC: ' + '{:.2E}'.format(bic)
             if len(features) <= 2:
                 s.write_gmm_plots(k_name + '.png', gmm, features, X, origin_cluster, subtitle)
-            s.write_bics(root_name + '_scores.csv', features, [k], [bic])
+            s._write_gmm_scores(root_name + '_scores.csv', features, [k], [bic])
             bic_scores.append(bic)
             
         if len(bic_scores) > 1:
-            s.save_score_plot(root_name + '_scores.png', k_range, bic_scores)   
+            s._save_score_plot(root_name + '_scores.png', k_range, bic_scores)   
             
         return bic_scores
     
@@ -282,7 +291,7 @@ class ClusterSearch:
             print(v ,  ' {:.3}'.format(k/total))
     
     #-------------------------------------------
-    def write_clusters(s, outfile, features, clusters):
+    def _write_km_clusters(s, outfile, features, clusters):
         """Writes cluster means to a outfile as a csv file. """
         with open(outfile, 'w') as f:
             feature_data = []
@@ -294,7 +303,7 @@ class ClusterSearch:
                 writer.writerow(row_txt)        
         
     #-------------------------------------------
-    def write_gmm_clusters(s, outfile, clf, features, X,  subtitle=None):
+    def _write_gmm_clusters(s, outfile, clf, features, X,  subtitle=None):
         """Saves the means, covariances, and weights of gmm clusters in clf. 
         
         TODO: add weights (priors).
@@ -359,7 +368,7 @@ class ClusterSearch:
             x = np.linspace(min(X),max(X),100)
             bins = np.linspace(min(X),max(X),100)
             plt.hist(X[:,0], bins=bins, color='green', histtype='bar', \
-                     ec='black', normed=True)
+                     ec='black', density=True)
             axes = plt.gca()
             ylim = axes.get_ylim()
             for i, (mean, cov, color) in enumerate(zip(clf.means_, clf.covariances_,
@@ -375,7 +384,7 @@ class ClusterSearch:
         plt.close()
         
     #-------------------------------------------
-    def calc_sil_score(s,X,y):
+    def _calc_sil_score(s,X,y):
         """Calculate silhoutte score with efficiency mods. """
 
         if(X.shape[0] > 5000):
@@ -394,20 +403,25 @@ class ClusterSearch:
         
         
     #-------------------------------------------
-    def save_score_plot(s, score_fname, k_range, ch_scores):
+    def _save_score_plot(s, score_fname, k_range, ch_scores, sil_scores=None):
         """ Save png files for plots of data with clusters.
             TODO: plot tsne when d > 2.
         """
-        plt.plot(k_range, ch_scores)
+        plt.plot(k_range, np.array(ch_scores)/max(ch_scores), label='CH score', 
+                 marker='o')
+        if not (sil_scores is  None):
+            plt.plot(k_range, np.array(sil_scores)/max(sil_scores), 
+                     label='Sil. score', marker='o')
         plt.xlabel('# clusters')
         plt.ylabel('score')
+        plt.legend()
         plt.title('scores ' + score_fname)
         plt.savefig(score_fname)
         plt.close()
         
         
     #-------------------------------------------
-    def write_plots(s, fname, header, data, cluster_list,  subtitle=None):
+    def _save_km_cluster_plots(s, fname, header, data, cluster_list,  subtitle=None):
         """ Save png files for plots of data with clusters.
             TODO: plot tsne when d > 2.
         """
@@ -471,9 +485,9 @@ class ClusterSearch:
                     
                     bins = np.arange(0, lim + binwidth, binwidth)
                     axHistx.hist(data[:,0], bins=bins, color='green', \
-                                 histtype='bar', ec='black', normed=1)
+                                 histtype='bar', ec='black', density=1)
                     axHisty.hist(data[:,1], bins=bins, orientation='horizontal',\
-                                 histtype='bar', ec='black' , normed=1)
+                                 histtype='bar', ec='black' , density=1)
                     
                     axHistx.set_xlim(axScatter.get_xlim())
                     axHisty.set_ylim(axScatter.get_ylim())                
@@ -485,7 +499,7 @@ class ClusterSearch:
                 if len(cluster_list) > 1:
                     plt.subplot(num_row, num_col,i+1)        
                 plt.hist(data[:,0], 50, color='green', \
-                     histtype='bar', ec='black', normed=1)                    
+                     histtype='bar', ec='black', density=1)                    
                 #plt.scatter(data[:,0], np.ones(data.shape[0]), alpha = 0.01)
                 plt.scatter(clusters[:,0], np.zeros(clusters.shape[0]), s=500, \
                             c='red')
@@ -497,11 +511,11 @@ class ClusterSearch:
         plt.close()
             
     #-------------------------------------------
-    def write_scores(s, score_fname, features, k_range, sil_scores, ch_scores):
-        df_scores= pd.DataFrame.from_items([
-            ('features', '_'.join(features).replace(' ','')),
-            ('sil score', sil_scores),
-            ('CH score', ch_scores)])
+    def _write_km_scores(s, score_fname, features, k_range, sil_scores, ch_scores):
+        df_scores= pd.DataFrame.from_dict({
+            'features': ['_'.join(features).replace(' ','')],
+            'sil score': sil_scores,
+            'CH score': ch_scores})
         df_scores.index = k_range[0:len(sil_scores)]
         # append to score file if exists, otherwise create new
         if os.path.isfile(score_fname):
@@ -511,10 +525,10 @@ class ClusterSearch:
             df_scores.to_csv(score_fname, index_label='k')             
 
     #-------------------------------------------
-    def write_bics(s, score_fname, features, k_range, bics):
-        df_scores= pd.DataFrame.from_items([
-            ('features', '_'.join(features).replace(' ','')),
-            ('bic', bics)])
+    def _write_gmm_scores(s, score_fname, features, k_range, bics):
+        df_scores= pd.DataFrame.from_dict({
+            'features': ['_'.join(features).replace(' ','')],
+            'bic': bics})
         df_scores.index = k_range[0:len(bics)]
         # append to score file if exists, otherwise create new
         if os.path.isfile(score_fname):
@@ -524,17 +538,15 @@ class ClusterSearch:
             df_scores.to_csv(score_fname, index_label='k') 
 
 #------------------------------------------------------------------------
-def do_all(args):
-    c_search = ClusterSearch(**vars(args))
-    
-    features=['AU06_r','AU12_r']
-    # all features:
-    #features=['AU01_r','AU02_r','AU04_r', 'AU05_r', 'AU06_r','AU07_r','AU09_r',\
-    #          'AU10_r','AU12_r','AU14_r','AU15_r','AU17_r','AU20_r',\
-    #          'AU23_r','AU25_r','AU26_r','AU45_r']
-    # smile features:
-    #features=['AU06_r','AU07_r',\
-    #          'AU10_r','AU12_r','AU14_r']
+def _do_all(args, features):
+    if args.algorithm == 'km':
+        k_range = range(2, args.kmax+1)
+    elif args.algorithm == 'gmm':
+        k_range = range(1, args.kmax+1)
+    d_range = range(1, args.dmax+1)   
+    c_search = ClusterSearch(infile=args.infile, outdir=args.outdir, 
+                             algorithm=args.algorithm, k_range=k_range, 
+                             d_range=d_range, repeats=args.repeats)
 
     c_search.feature_search(features)
     
@@ -543,19 +555,23 @@ if __name__ == '__main__':
 
     # Setup commandline parser
     help_intro = 'Program for running clustering on feature subsets.'
-    help_intro += '  example usage:\n\t$ ./cluster.py -i \'example/test.csv\''
-    help_intro += ' -t gmm -k 6 -d 2'
+    help_intro += '  example usage:\n\t$ ./clustersearch.py -i '
+    help_intro += '\'../data/test.csv\''
+    help_intro += ' -a km -k 6 -d 2 -o \'../output\''
     parser = argparse.ArgumentParser(description=help_intro)
 
-    parser.add_argument('--infile', help='inputs, ex:example/test.csv', type=str, 
-                        default='../data/test.csv')
+    parser.add_argument('--infile', help='input file csv, ex:../data/test.csv', 
+                        type=str, default='../data/test.csv')
     parser.add_argument('--algorithm', help='type: {gmm, km}', type=str, 
                         default='km')
     parser.add_argument('--kmax', help='maximum k', type=int, 
-                        default=4)
+                        default=3)
     parser.add_argument('--dmax', help='maximum number of feature dimensions', 
                         type=int, 
                         default=2)
+    parser.add_argument('--repeats', help='number of reruns', 
+                        type=int, 
+                        default=1)
     parser.add_argument('--outdir', help='output directory', type=str, 
                         default='../output')
     
@@ -563,6 +579,16 @@ if __name__ == '__main__':
     
     print('args: ', args)
 
-    do_all(args)
+    #TODO: consider if worthwhile to remove hardcode and add cmdline option
+    features=['AU06_r','AU12_r']    
+    # all features:
+    #features=['AU01_r','AU02_r','AU04_r', 'AU05_r', 'AU06_r','AU07_r','AU09_r',\
+    #          'AU10_r','AU12_r','AU14_r','AU15_r','AU17_r','AU20_r',\
+    #          'AU23_r','AU25_r','AU26_r','AU45_r']
+    # smile features:
+    #features=['AU06_r','AU07_r',\
+    #          'AU10_r','AU12_r','AU14_r']
+
+    _do_all(args, features)
     log.info('PROGRAM COMPLETE')
 
